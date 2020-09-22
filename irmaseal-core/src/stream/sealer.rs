@@ -1,10 +1,10 @@
+use arrayvec::ArrayVec;
+use futures::stream;
+use futures::{Sink, SinkExt, Stream, StreamExt};
 use hmac::Mac;
 use rand::{CryptoRng, Rng};
-use std::vec::Vec;
-use futures::{Stream, StreamExt, Sink, SinkExt};
-use futures::stream;
-use arrayvec::ArrayVec;
 use std::marker::Unpin;
+use std::vec::Vec;
 
 use crate::stream::*;
 use crate::*;
@@ -49,17 +49,24 @@ impl Sealer {
         hmac.input(&iv);
         metadata.extend(&iv);
 
-        Ok(Sealer { aes, hmac, metadata })
+        Ok(Sealer {
+            aes,
+            hmac,
+            metadata,
+        })
     }
 
     pub async fn seal(
         &mut self,
         mut input: impl Stream<Item = u8> + Unpin,
-        mut output: impl Sink<u8> + Unpin
+        mut output: impl Sink<u8> + Unpin,
     ) -> Result<(), Error> {
         //TODO: Check whether final byte is not included here
         let metadata_stream = stream::iter(self.metadata.iter());
-        let result = metadata_stream.map(|byte| Ok(*byte)).forward(&mut output).await;
+        let result = metadata_stream
+            .map(|byte| Ok(*byte))
+            .forward(&mut output)
+            .await;
         if result.is_err() {
             // TODO: Check error messages
             return Err(Error::UpstreamWritableError);
@@ -69,14 +76,14 @@ impl Sealer {
         while let Some(byte) = input.next().await {
             buffer.push(byte);
             if buffer.is_full() {
-                let result = self.seal_block(&mut output, &mut buffer).await;
+                let result = self.seal_block(&mut buffer, &mut output).await;
                 if result.is_err() {
                     return result;
                 }
             }
         }
         if !buffer.is_empty() {
-            let result = self.seal_block(&mut output, &mut buffer).await;
+            let result = self.seal_block(&mut buffer, &mut output).await;
             if result.is_err() {
                 return result;
             }
@@ -93,19 +100,26 @@ impl Sealer {
             // TODO: Check error messages
             return Err(Error::UpstreamWritableError);
         }
-        Ok(())
+        // TODO: Check error messages
+        output
+            .flush()
+            .await
+            .map_err(|_| Error::UpstreamWritableError)
     }
 
     async fn seal_block(
         &mut self,
+        buffer: &mut ArrayVec<[u8; BLOCKSIZE]>,
         mut output: impl Sink<u8> + Unpin,
-        buffer: &mut ArrayVec<[u8; BLOCKSIZE]>
     ) -> Result<(), Error> {
         let block = buffer.as_mut_slice();
         self.aes.encrypt(block).await;
         self.hmac.input(block);
         let block_stream = stream::iter(block);
-        let result = block_stream.map(|byte| Ok(*byte)).forward(&mut output).await;
+        let result = block_stream
+            .map(|byte| Ok(*byte))
+            .forward(&mut output)
+            .await;
         if result.is_err() {
             // TODO: Check error messages
             return Err(Error::UpstreamWritableError);

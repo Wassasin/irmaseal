@@ -1,6 +1,8 @@
 use clap::ArgMatches;
+use futures::SinkExt;
 use irmaseal_core::stream::Sealer;
 use irmaseal_core::Identity;
+use std::io::Read;
 use std::time::SystemTime;
 
 fn now() -> u64 {
@@ -41,29 +43,18 @@ pub async fn exec(m: &ArgMatches<'_>) {
     let output = format!("{}.irma", input);
     let mut w = crate::util::FileWriter::new(std::fs::File::create(&output).unwrap());
 
-    let mut sealer = Sealer::new(&i, &parameters.public_key, &mut rng, &mut w).unwrap();
-
-    use std::io::Read;
-    let mut src = std::fs::File::open(input).unwrap();
-    let mut buf = [0u8; 512];
+    let mut sealer = Sealer::new(&i, &parameters.public_key, &mut rng)
+        .await
+        .unwrap();
+    let src = std::fs::File::open(input).unwrap();
 
     eprintln!("Encrypting {}...", input);
 
-    let mut total_len = 0;
-    loop {
-        let len = src.read(&mut buf).unwrap();
-        total_len += len;
+    let input_iter = src.bytes().map(|next| next.unwrap());
+    let input_stream = futures::stream::iter(input_iter);
+    sealer.seal(input_stream, &mut w).await.unwrap();
+    // TODO: Is it logical to let the caller close the sink (as it also initialized it) or can irmaseal-core better do so?
+    w.close().await.unwrap();
 
-        if len == 0 {
-            break;
-        }
-
-        use irmaseal_core::Writable;
-        sealer.write(&buf[0..len]).unwrap();
-    }
-
-    eprintln!(
-        "Encrypted {} bytes, written result to {}",
-        total_len, output
-    );
+    eprintln!("Result written to {}", output);
 }

@@ -66,10 +66,10 @@ pub async fn exec(m: &ArgMatches<'_>) {
     if let Some(r) = wait_on_session(client, &sp, timestamp).await.unwrap() {
         eprintln!("Disclosure successful, decrypting {} to {}", input, output);
 
-        let mut o = o.unseal(&r.key.unwrap()).unwrap();
+        let mut o = o.unseal(&r.key.unwrap()).await.unwrap();
 
         let mut of = crate::util::FileWriter::new(std::fs::File::create(output).unwrap());
-        o.write_to(&mut of).unwrap();
+        o.write_to(&mut of).await.unwrap();
 
         eprintln!("Succesfully decrypted {}", output);
     } else {
