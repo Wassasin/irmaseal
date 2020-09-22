@@ -82,8 +82,8 @@ impl Sealer {
             }
         }
         let code = self.hmac.result_reset().code();
-        let code_stream = stream::iter(code.iter());
-        let result = code_stream.map(|byte| Ok(*byte)).forward(&mut output).await;
+        let code_stream = stream::iter(code);
+        let result = code_stream.map(|byte| Ok(byte)).forward(&mut output).await;
         if result.is_err() {
             // TODO: Check error messages
             return Err(Error::UpstreamWritableError);
@@ -104,7 +104,7 @@ impl Sealer {
         let block = buffer.as_mut_slice();
         self.aes.encrypt(block).await;
         self.hmac.input(block);
-        let block_stream = stream::iter(block.iter());
+        let block_stream = stream::iter(block);
         let result = block_stream.map(|byte| Ok(*byte)).forward(&mut output).await;
         if result.is_err() {
             // TODO: Check error messages
