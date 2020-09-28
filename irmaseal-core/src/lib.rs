@@ -1,11 +1,8 @@
-// TODO: Check how to enable no_std in combination with support for futures and async/await.
-//#![no_std]
-
 mod artifacts;
 mod identity;
 
-pub mod util;
 pub mod api;
+pub mod util;
 
 #[cfg(feature = "stream")]
 pub mod stream;

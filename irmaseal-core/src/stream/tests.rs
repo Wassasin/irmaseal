@@ -3,9 +3,9 @@ use crate::util::SliceReader;
 use crate::*;
 
 use arrayvec::ArrayVec;
-use rand::RngCore;
 use futures::executor::block_on;
 use futures::StreamExt;
+use rand::RngCore;
 
 type BigBuf = ArrayVec<[u8; 65536]>;
 
@@ -38,7 +38,9 @@ fn seal<'a>(props: &DefaultProps, content: &[u8]) -> Vec<u8> {
     let mut buf: Vec<u8> = Vec::new();
 
     let future = async {
-        let mut s = Sealer::new(&i, &PublicKey(pk.clone()), &mut rng).await.unwrap();
+        let mut s = Sealer::new(&i, &PublicKey(pk.clone()), &mut rng)
+            .await
+            .unwrap();
         let mut content_stream = futures::stream::iter(content.iter()).map(|byte| *byte);
         s.seal(&mut content_stream, &mut buf).await.unwrap();
     };
