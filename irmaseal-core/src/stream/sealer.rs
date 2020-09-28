@@ -10,20 +10,19 @@ use crate::stream::*;
 use crate::*;
 
 /// Sealer for an bytestream, which converts it into an IRMAseal encrypted bytestream.
-pub struct Sealer<'a, R: Rng + CryptoRng> {
+pub struct Sealer<'a> {
     identity: &'a Identity,
     ciphertext_keys: [u8; 144],
     aes_key: [u8; 32],
     mac_key: [u8; 32],
-    rng: &'a mut R,
 }
 
-impl<'a, R: Rng + CryptoRng> Sealer<'a, R> {
-    pub async fn new(
+impl<'a> Sealer<'a> {
+    pub async fn new<R: Rng + CryptoRng>(
         identity: &'a Identity,
         pk: &PublicKey,
-        rng: &'a mut R,
-    ) -> Result<Sealer<'a, R>, Error> {
+        rng: &mut R,
+    ) -> Result<Sealer<'a>, Error> {
         let (c, k) = ibe::kiltz_vahlis_one::encrypt(&pk.0, &identity.derive(), rng);
         let (aes_key, mac_key) = crate::stream::util::derive_keys(&k);
 
@@ -34,16 +33,16 @@ impl<'a, R: Rng + CryptoRng> Sealer<'a, R> {
             ciphertext_keys,
             aes_key,
             mac_key,
-            rng,
         })
     }
 
-    pub async fn seal(
+    pub async fn seal<R: Rng + CryptoRng>(
         &mut self,
         mut input: impl Stream<Item = u8> + Unpin,
         mut output: impl Sink<u8> + Unpin,
+        rng: &mut R,
     ) -> Result<(), Error> {
-        let iv = crate::stream::util::generate_iv(self.rng);
+        let iv = crate::stream::util::generate_iv(rng);
 
         let mut aes = SymCrypt::new(&self.aes_key.into(), &iv.into()).await;
         let mut hmac = Verifier::new_varkey(&self.mac_key).unwrap();

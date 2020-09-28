@@ -42,7 +42,9 @@ fn seal<'a>(props: &DefaultProps, content: &[u8]) -> Vec<u8> {
             .await
             .unwrap();
         let mut content_stream = futures::stream::iter(content.iter()).map(|byte| *byte);
-        s.seal(&mut content_stream, &mut buf).await.unwrap();
+        s.seal(&mut content_stream, &mut buf, &mut rng)
+            .await
+            .unwrap();
     };
     block_on(future);
 

@@ -52,7 +52,7 @@ pub async fn exec(m: &ArgMatches<'_>) {
 
     let input_iter = src.bytes().map(|next| next.unwrap());
     let input_stream = futures::stream::iter(input_iter);
-    sealer.seal(input_stream, &mut w).await.unwrap();
+    sealer.seal(input_stream, &mut w, &mut rng).await.unwrap();
     // TODO: Is it logical to let the caller close the sink (as it also initialized it) or can irmaseal-core better do so?
     w.close().await.unwrap();
 
