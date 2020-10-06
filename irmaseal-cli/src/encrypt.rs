@@ -1,8 +1,9 @@
 use clap::ArgMatches;
-use futures::SinkExt;
+use futures::io::{AllowStdIo, BufWriter};
+use futures::AsyncWriteExt;
 use irmaseal_core::stream::Sealer;
 use irmaseal_core::Identity;
-use std::io::Read;
+use std::io::BufReader;
 use std::time::SystemTime;
 
 fn now() -> u64 {
@@ -41,20 +42,19 @@ pub async fn exec(m: &ArgMatches<'_>) {
     eprintln!("Encrypting for recipient {:#?}", i);
 
     let output = format!("{}.irma", input);
-    let mut w = crate::util::FileWriter::new(std::fs::File::create(&output).unwrap());
+    //let mut w = crate::util::FileWriter::new(std::fs::File::create(&output).unwrap());
+    let mut w = BufWriter::new(AllowStdIo::new(std::fs::File::create(&output).unwrap()));
 
-    let mut sealer = Sealer::new(&i, &parameters.public_key, &mut rng)
-        .await
-        .unwrap();
+    let mut sealer = Sealer::new(&i, &parameters.public_key, &mut rng).unwrap();
     let src = std::fs::File::open(input).unwrap();
 
     eprintln!("Encrypting {}...", input);
 
-    let input_iter = src.bytes().map(|next| next.unwrap());
-    let input_stream = futures::stream::iter(input_iter);
-    sealer.seal(input_stream, &mut w, &mut rng).await.unwrap();
+    let input_reader = AllowStdIo::new(BufReader::new(src));
+    sealer.seal(input_reader, &mut w, &mut rng).await.unwrap();
     // TODO: Is it logical to let the caller close the sink (as it also initialized it) or can irmaseal-core better do so?
     w.close().await.unwrap();
+    //w.close().await.unwrap();
 
     eprintln!("Result written to {}", output);
 }
