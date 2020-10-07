@@ -51,7 +51,7 @@ pub async fn exec(m: &ArgMatches<'_>) {
     eprintln!("Encrypting {}...", input);
 
     let input_reader = AllowStdIo::new(BufReader::new(src));
-    sealer.seal(input_reader, &mut w, &mut rng).await.unwrap();
+    sealer.seal(input_reader, &mut w).await.unwrap();
     // TODO: Is it logical to let the caller close the sink (as it also initialized it) or can irmaseal-core better do so?
     w.close().await.unwrap();
     //w.close().await.unwrap();

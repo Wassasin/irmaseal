@@ -1,13 +1,9 @@
 use crate::stream::*;
-use crate::util::SliceReader;
 use crate::*;
 
-use arrayvec::ArrayVec;
 use futures::executor::block_on;
-use futures::StreamExt;
+use futures::io::Cursor;
 use rand::RngCore;
-
-type BigBuf = ArrayVec<[u8; 65536]>;
 
 struct DefaultProps {
     pub i: Identity,
@@ -39,38 +35,33 @@ fn seal<'a>(props: &DefaultProps, content: &[u8]) -> Vec<u8> {
 
     let future = async {
         let mut s = Sealer::new(&i, &PublicKey(pk.clone()), &mut rng).unwrap();
-        let mut content_stream = futures::stream::iter(content.iter()).map(|byte| *byte);
-        s.seal(&mut content_stream, &mut buf, &mut rng)
-            .await
-            .unwrap();
+        s.seal(content, &mut buf).await.unwrap();
     };
     block_on(future);
 
     buf
 }
 
-fn unseal(props: &DefaultProps, buf: &[u8]) -> (BigBuf, bool) {
+fn unseal(props: &DefaultProps, buf: &[u8]) -> (Vec<u8>, bool) {
     let mut rng = rand::thread_rng();
     let DefaultProps { i, pk, sk } = props;
 
-    let bufr = SliceReader::new(&buf);
-    let (i2, o) = OpenerSealed::new(bufr).unwrap();
-
-    assert_eq!(i, &i2);
-
-    let usk = ibe::kiltz_vahlis_one::extract_usk(&pk, &sk, &i2.derive(), &mut rng);
-
     let future = async {
-        let mut o = o.unseal(&UserSecretKey(usk)).await.unwrap();
-        let mut dst = BigBuf::new();
-        o.write_to(&mut dst).await.unwrap();
+        let mut cursor = Cursor::new(buf);
+        let (i2, o) = OpenerSealed::new(&mut cursor).await.unwrap();
 
-        (dst, o.validate())
+        assert_eq!(i, &i2);
+
+        let usk = ibe::kiltz_vahlis_one::extract_usk(&pk, &sk, &i2.derive(), &mut rng);
+        let mut dst = Vec::new();
+        let validated = o.unseal(&UserSecretKey(usk), &mut dst).await.unwrap();
+
+        (dst, validated)
     };
     block_on(future)
 }
 
-fn seal_and_unseal(props: &DefaultProps, content: &[u8]) -> (BigBuf, bool) {
+fn seal_and_unseal(props: &DefaultProps, content: &[u8]) -> (Vec<u8>, bool) {
     let buf = seal(props, content);
     unseal(props, &buf)
 }

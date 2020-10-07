@@ -6,6 +6,8 @@ use std::time::Duration;
 use tokio::time::delay_for;
 
 use crate::client::{Client, ClientError, OwnedKeyChallenge};
+use futures::io::{AllowStdIo, BufWriter};
+use std::io::BufReader;
 
 fn print_qr(s: &str) {
     let code = qrcode::QrCode::new(s).unwrap();
@@ -43,9 +45,9 @@ pub async fn exec(m: &ArgMatches<'_>) {
 
     eprintln!("Opening {}", input);
 
-    let r = crate::util::FileReader::new(std::fs::File::open(input).unwrap());
+    let r = AllowStdIo::new(BufReader::new(std::fs::File::open(input).unwrap()));
 
-    let (identity, o) = OpenerSealed::new(r).unwrap();
+    let (identity, o) = OpenerSealed::new(r).await.unwrap();
     let timestamp = identity.timestamp;
 
     let client = Client::new(server).unwrap();
@@ -66,10 +68,12 @@ pub async fn exec(m: &ArgMatches<'_>) {
     if let Some(r) = wait_on_session(client, &sp, timestamp).await.unwrap() {
         eprintln!("Disclosure successful, decrypting {} to {}", input, output);
 
-        let mut o = o.unseal(&r.key.unwrap()).await.unwrap();
-
-        let mut of = crate::util::FileWriter::new(std::fs::File::create(output).unwrap());
-        o.write_to(&mut of).await.unwrap();
+        let of = BufWriter::new(AllowStdIo::new(std::fs::File::create(output).unwrap()));
+        let valid = o.unseal(&r.key.unwrap(), of).await.unwrap();
+        if !valid {
+            eprintln!("Invalid file integrity");
+            return;
+        }
 
         eprintln!("Succesfully decrypted {}", output);
     } else {

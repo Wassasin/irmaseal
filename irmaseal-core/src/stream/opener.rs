@@ -1,60 +1,79 @@
-use crate::stream::util::ArchiveReader;
 use crate::stream::*;
 use crate::*;
 
-use arrayref::array_ref;
+use crate::util::SliceReader;
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, TryFutureExt};
 use hmac::Mac;
 
 /// First stage opener of an IRMAseal encrypted bytestream.
 /// It reads the IRMAseal header, and yields the recipient Identity for which the content is intended.
 ///
 /// Enables the library user to lookup the UserSecretKey corresponding to this Identity before continuing.
-pub struct OpenerSealed<R: Readable> {
-    ar: ArchiveReader<R, [u8; 2048]>,
+pub struct OpenerSealed<R: AsyncRead + Unpin> {
+    input_reader: R,
+    metadata: Vec<u8>,
 }
 
-/// Second stage opener of an IRMAseal encrypted bytestream.
-///
-/// **Warning**: will only validate the authenticity of the plaintext when calling `validate`.
-pub struct OpenerUnsealed<R: Readable> {
-    aes: SymCrypt,
-    hmac: Verifier,
-    r: R,
-    resultbuf: Option<[u8; BLOCKSIZE]>,
-}
-
-impl<R: Readable> OpenerSealed<R> {
+impl<R: AsyncRead + Unpin> OpenerSealed<R> {
     /// Starts interpreting a bytestream as an IRMAseal stream.
     /// Will immediately detect whether the bytestream actually is such a stream, and will yield
     /// the identity for which the stream is intended, as well as the stream continuation.
-    pub fn new(r: R) -> Result<(Identity, OpenerSealed<R>), Error> {
-        let mut ar = ArchiveReader::<R, [u8; 2048]>::new(r);
-
-        let prelude = ar.read_bytes_strict(PRELUDE.len())?;
-        if prelude != PRELUDE {
+    pub async fn new(mut r: R) -> Result<(Identity, OpenerSealed<R>), Error> {
+        let mut buffer = [0u8; 14];
+        r.read_exact(&mut buffer)
+            // TODO: Check error messages
+            .map_err(|_| Error::UpstreamWritableError)
+            .await?;
+        if buffer[..4] != PRELUDE {
             return Err(Error::NotIRMASEAL);
         }
 
-        let format_version = ar.read_byte()?;
-        if format_version != FORMAT_VERSION {
+        if buffer[4] != FORMAT_VERSION {
             return Err(Error::IncorrectVersion);
         }
 
-        let i = Identity::read_from(&mut ar)?;
+        // TODO: Temporary read all bytes first. Can be changed when Rowan's metadata is merged.
+        let identity_length = usize::from(u8::from_be(buffer[13]));
+        let mut metadata = vec![0u8; 15 + identity_length];
+        let metadata_slice = metadata.as_mut_slice();
+        metadata_slice[..14].copy_from_slice(&buffer);
+        r.read_exact(&mut metadata_slice[14..])
+            // TODO: Check error messages
+            .map_err(|_| Error::UpstreamWritableError)
+            .await?;
+        let attribute_length = usize::from(u8::from_be(*metadata.last().unwrap()));
+        let mut attribute = vec![0u8; attribute_length];
+        r.read_exact(attribute.as_mut_slice())
+            // TODO: Check error messages
+            .map_err(|_| Error::UpstreamWritableError)
+            .await?;
+        metadata.extend(attribute);
+        let i = Identity::read_from(&mut SliceReader::new(&metadata.as_slice()[5..]))?;
 
-        Ok((i, OpenerSealed { ar }))
+        Ok((
+            i,
+            OpenerSealed {
+                input_reader: r,
+                metadata,
+            },
+        ))
     }
 
-    /// Will unseal the stream continuation and yield a plaintext bytestream.
-    pub async fn unseal(mut self, usk: &UserSecretKey) -> Result<OpenerUnsealed<R>, Error> {
-        const CIPHERTEXT_SIZE: usize = 144;
-
-        let cbuf = self.ar.read_bytes_strict(CIPHERTEXT_SIZE)?;
-        let c = crate::util::open_ct(ibe::kiltz_vahlis_one::CipherText::from_bytes(array_ref![
-            cbuf,
-            0,
-            CIPHERTEXT_SIZE
-        ]))
+    /// Will unseal the stream continuation and write the plaintext in the given writer.
+    pub async fn unseal<W: AsyncWrite + Unpin>(
+        mut self,
+        usk: &UserSecretKey,
+        mut output: W,
+    ) -> Result<bool, Error> {
+        let mut ciphertext_buffer = [0u8; 144];
+        self.input_reader
+            .read_exact(&mut ciphertext_buffer)
+            // TODO: Check error messages
+            .map_err(|_| Error::UpstreamWritableError)
+            .await?;
+        let c = crate::util::open_ct(ibe::kiltz_vahlis_one::CipherText::from_bytes(
+            &ciphertext_buffer,
+        ))
         .ok_or(Error::FormatViolation)?;
 
         let m = ibe::kiltz_vahlis_one::decrypt(&usk.0, &c);
@@ -62,85 +81,66 @@ impl<R: Readable> OpenerSealed<R> {
 
         let mut hmac = Verifier::new_varkey(&mackey).unwrap();
 
-        let (headerbuf, mut r) = self.ar.disclose();
-        hmac.input(&headerbuf);
+        hmac.input(self.metadata.as_slice());
+        hmac.input(&ciphertext_buffer);
 
-        let iv = r.read_bytes_strict(IVSIZE)?;
-        let iv: &[u8; IVSIZE] = array_ref![&iv, 0, IVSIZE];
-        hmac.input(iv);
+        let mut iv = [0u8; IVSIZE];
+        self.input_reader
+            .read_exact(&mut iv)
+            // TODO: Check error messages
+            .map_err(|_| Error::UpstreamWritableError)
+            .await?;
+        hmac.input(&iv);
 
-        let aes = SymCrypt::new(&skey.into(), &(*iv).into()).await;
+        let mut aes = SymCrypt::new(&skey.into(), &iv).await;
+        let mut buffer = [0u8; MACSIZE + 2 * BLOCKSIZE];
 
-        Ok(OpenerUnsealed {
-            aes,
-            hmac,
-            r,
-            resultbuf: None,
-        })
-    }
-}
+        // The input buffer must at least contain enough bytes for a MAC to be included.
+        self.input_reader
+            .read_exact(&mut buffer[..MACSIZE])
+            // TODO: Check error messages
+            .map_err(|_| Error::UpstreamWritableError)
+            .await?;
 
-impl<R: Readable> OpenerUnsealed<R> {
-    /// Read up to `BLOCKSIZE` bytes at a time.
-    pub async fn read(&mut self) -> Result<&[u8], Error> {
-        let (resultsize, macbuf) = match self.resultbuf.as_mut() {
-            None => (BLOCKSIZE, None),
-            Some(dst) => {
-                let mut macbuf = [0u8; MACSIZE];
-                macbuf.copy_from_slice(&dst[BLOCKSIZE - MACSIZE..BLOCKSIZE]);
-                (BLOCKSIZE - MACSIZE, Some(macbuf))
-            }
-        };
-
-        // TODO eliminate extra check.
-        let dst = self.resultbuf.get_or_insert_with(|| [0u8; BLOCKSIZE]);
-        let src = self.r.read_bytes(resultsize)?;
-        let srcsize = src.len();
-
-        if srcsize == 0 {
-            return Err(Error::EndOfStream);
-        }
-
-        let dstmid = BLOCKSIZE - srcsize;
-        dst[dstmid..BLOCKSIZE].copy_from_slice(src);
-
-        let dststart = match macbuf {
-            None => dstmid,
-            Some(macbuf) => {
-                let dststart = dstmid - MACSIZE;
-                dst[dststart..dstmid].copy_from_slice(&macbuf);
-                dststart
-            }
-        };
-
-        let mut content = &mut dst[dststart..BLOCKSIZE - MACSIZE];
-        self.hmac.input(content);
-        self.aes.decrypt(&mut content).await;
-
-        Ok(content)
-    }
-
-    /// Will check the HMAC once the entire stream is exhausted.
-    /// Will only yield the correct value once the **entire** stream is read
-    /// using `write_to`, or by manually calling `write` until `Error::EndOfStream` is yielded.
-    pub fn validate(self) -> bool {
-        match self.resultbuf {
-            None => false,
-            Some(resultbuf) => {
-                let macbuf = &resultbuf[BLOCKSIZE - MACSIZE..BLOCKSIZE];
-                self.hmac.verify(macbuf).is_ok()
-            }
-        }
-    }
-
-    /// Will block and write the entire stream to the argument writer.
-    pub async fn write_to<W: Writable>(&mut self, w: &mut W) -> Result<(), Error> {
+        let mut buffer_tail = MACSIZE;
         loop {
-            match self.read().await {
-                Ok(buf) => w.write(buf)?,
-                Err(Error::EndOfStream) => return Ok(()),
-                Err(e) => return Err(e),
-            };
+            let input_length = self
+                .input_reader
+                .read(&mut buffer[buffer_tail..buffer_tail + BLOCKSIZE])
+                // TODO: Check error messages
+                .map_err(|_| Error::UpstreamWritableError)
+                .await?;
+            buffer_tail += input_length;
+
+            // TODO: Consider size of buffer for efficiency
+            if buffer_tail > BLOCKSIZE + MACSIZE || input_length == 0 && buffer_tail > MACSIZE {
+                let mut block = &mut buffer[0..buffer_tail - MACSIZE];
+                hmac.input(&mut block);
+                aes.encrypt(&mut block).await;
+                output
+                    .write_all(&mut block)
+                    // TODO: Check error messages
+                    .map_err(|_| Error::UpstreamWritableError)
+                    .await?;
+
+                // Make sure potential MAC is shifted to the front of the array.
+                let mut tmp = [0u8; MACSIZE];
+                tmp.copy_from_slice(&buffer[buffer_tail - MACSIZE..buffer_tail]);
+                buffer[..MACSIZE].copy_from_slice(&tmp);
+
+                buffer_tail = MACSIZE;
+            }
+
+            if input_length == 0 {
+                break;
+            }
         }
+
+        output
+            .flush()
+            // TODO: Check error messages
+            .map_err(|_| Error::UpstreamWritableError)
+            .await?;
+        Ok(hmac.verify(&buffer[..MACSIZE]).is_ok())
     }
 }

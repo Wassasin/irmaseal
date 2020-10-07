@@ -8,19 +8,20 @@ use crate::stream::*;
 use crate::*;
 
 /// Sealer for an bytestream, which converts it into an IRMAseal encrypted bytestream.
-pub struct Sealer<'a> {
+pub struct Sealer<'a, C: CryptoRng + Rng> {
     identity: &'a Identity,
+    rng: &'a mut C,
     ciphertext_keys: [u8; 144],
     aes_key: [u8; 32],
     mac_key: [u8; 32],
 }
 
-impl<'a> Sealer<'a> {
-    pub fn new<R: Rng + CryptoRng>(
+impl<'a, C: CryptoRng + Rng> Sealer<'a, C> {
+    pub fn new(
         identity: &'a Identity,
         pk: &PublicKey,
-        rng: &mut R,
-    ) -> Result<Sealer<'a>, Error> {
+        rng: &'a mut C,
+    ) -> Result<Sealer<'a, C>, Error> {
         let (c, k) = ibe::kiltz_vahlis_one::encrypt(&pk.0, &identity.derive(), rng);
         let (aes_key, mac_key) = crate::stream::util::derive_keys(&k);
 
@@ -28,19 +29,19 @@ impl<'a> Sealer<'a> {
 
         Ok(Sealer {
             identity,
+            rng,
             ciphertext_keys,
             aes_key,
             mac_key,
         })
     }
 
-    pub async fn seal<R: Rng + CryptoRng>(
+    pub async fn seal<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         &mut self,
-        mut input: impl AsyncRead + Unpin,
-        mut output: impl AsyncWrite + Unpin,
-        rng: &mut R,
+        mut input: R,
+        mut output: W,
     ) -> Result<(), Error> {
-        let iv = crate::stream::util::generate_iv(rng);
+        let iv = crate::stream::util::generate_iv(&mut self.rng);
 
         let mut aes = SymCrypt::new(&self.aes_key.into(), &iv.into()).await;
         let mut hmac = Verifier::new_varkey(&self.mac_key).unwrap();
@@ -64,13 +65,14 @@ impl<'a> Sealer<'a> {
             if input_length == 0 {
                 break;
             }
-            self.seal_block(
-                &mut buffer[..input_length],
-                &mut output,
-                &mut aes,
-                &mut hmac,
-            )
-            .await?;
+            let block = &mut buffer[..input_length];
+            aes.encrypt(block).await;
+            hmac.input(block);
+            output
+                .write_all(block)
+                // TODO: Check error messages
+                .map_err(|_| Error::UpstreamWritableError)
+                .await?;
         }
 
         let code = hmac.result_reset().code();
@@ -87,25 +89,9 @@ impl<'a> Sealer<'a> {
             .await
     }
 
-    async fn seal_block(
-        &mut self,
-        buffer: &mut [u8],
-        mut output: impl AsyncWrite + Unpin,
-        aes: &mut SymCrypt,
-        hmac: &mut Verifier,
-    ) -> Result<(), Error> {
-        aes.encrypt(buffer).await;
-        hmac.input(buffer);
-        output
-            .write_all(buffer)
-            // TODO: Check error messages
-            .map_err(|_| Error::UpstreamWritableError)
-            .await
-    }
-
-    async fn write_metadata(
+    async fn write_metadata<W: AsyncWrite + Unpin>(
         &self,
-        mut output: impl AsyncWrite + Unpin,
+        mut output: W,
         hmac: &mut Verifier,
     ) -> Result<(), Error> {
         hmac.input(&PRELUDE);
@@ -138,8 +124,6 @@ impl<'a> Sealer<'a> {
             .map_err(|_| Error::UpstreamWritableError)
             .await?;
         Ok(())
-
-        // TODO write IV
     }
 }
 

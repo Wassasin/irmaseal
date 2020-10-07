@@ -1,7 +1,6 @@
 mod client;
 mod decrypt;
 mod encrypt;
-mod util;
 
 use clap::{load_yaml, App};
 use tokio::runtime::Runtime;
