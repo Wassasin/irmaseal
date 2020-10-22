@@ -1,4 +1,4 @@
-use super::{Error, Readable, Writable};
+use super::{LegacyError, Readable, Writable};
 use arrayref::array_ref;
 use arrayvec::{ArrayString, ArrayVec};
 use serde::{Deserialize, Serialize};
@@ -28,17 +28,20 @@ impl Attribute {
     /// Conveniently construct a new attribute. It is also possible to directly construct this object.
     ///
     /// Throws a ConstraintViolation when the type or value strings are too long.
-    pub fn new(atype: &str, value: Option<&str>) -> Result<Self, Error> {
-        let atype = ArrayString::<[u8; 255]>::from(atype).or(Err(Error::ConstraintViolation))?;
+    pub fn new(atype: &str, value: Option<&str>) -> Result<Self, LegacyError> {
+        let atype =
+            ArrayString::<[u8; 255]>::from(atype).or(Err(LegacyError::ConstraintViolation))?;
         let value = value
-            .map(|v| Ok(ArrayString::<[u8; 254]>::from(v).or(Err(Error::ConstraintViolation))?))
+            .map(|v| {
+                Ok(ArrayString::<[u8; 254]>::from(v).or(Err(LegacyError::ConstraintViolation))?)
+            })
             .transpose()?;
 
         Ok(Attribute { atype, value })
     }
 
     /// Write the byte representation of this attribute as a bytestream.
-    pub fn write_to<W: Writable>(&self, w: &mut W) -> Result<(), Error> {
+    pub fn write_to<W: Writable>(&self, w: &mut W) -> Result<(), LegacyError> {
         use core::convert::TryFrom;
 
         let at = self.atype.as_bytes();
@@ -53,7 +56,7 @@ impl Attribute {
                 let i = i.as_bytes();
 
                 if i.len() >= usize::from(IDENTITY_UNSET) {
-                    return Err(Error::ConstraintViolation);
+                    return Err(LegacyError::ConstraintViolation);
                 }
 
                 // ArrayString cannot be larger than 254.
@@ -67,10 +70,11 @@ impl Attribute {
     }
 
     /// Construct an attribute from a bytestream.
-    pub fn read_from<R: Readable>(r: &mut R) -> Result<Self, Error> {
+    pub fn read_from<R: Readable>(r: &mut R) -> Result<Self, LegacyError> {
         let at_len = u8::from_be(r.read_byte()?);
         let at_len = usize::from(at_len);
-        let atype = core::str::from_utf8(r.read_bytes(at_len)?).or(Err(Error::FormatViolation))?;
+        let atype =
+            core::str::from_utf8(r.read_bytes(at_len)?).or(Err(LegacyError::FormatViolation))?;
 
         // Unwrap is valid because it impossible to not fit given u8.
         let atype = ArrayString::<[u8; 255]>::from(atype).unwrap();
@@ -81,7 +85,7 @@ impl Attribute {
         } else {
             let i_len = usize::from(i_len);
             let value =
-                core::str::from_utf8(r.read_bytes(i_len)?).or(Err(Error::FormatViolation))?;
+                core::str::from_utf8(r.read_bytes(i_len)?).or(Err(LegacyError::FormatViolation))?;
 
             // Unwrap is valid because it impossible to not fit given u8.
             let value = ArrayString::<[u8; 254]>::from(value).unwrap();
@@ -96,7 +100,7 @@ impl Identity {
     /// Conveniently construct a new identity. It is also possible to directly construct this object.
     ///
     /// Throws a ConstraintViolation when the attribute or identity strings are too long.
-    pub fn new(timestamp: u64, atype: &str, value: Option<&str>) -> Result<Identity, Error> {
+    pub fn new(timestamp: u64, atype: &str, value: Option<&str>) -> Result<Identity, LegacyError> {
         Ok(Identity {
             timestamp,
             attribute: Attribute::new(atype, value)?,
@@ -104,13 +108,13 @@ impl Identity {
     }
 
     /// Write the byte representation of this identity as a bytestream.
-    pub fn write_to<W: Writable>(&self, w: &mut W) -> Result<(), Error> {
+    pub fn write_to<W: Writable>(&self, w: &mut W) -> Result<(), LegacyError> {
         w.write(&self.timestamp.to_be_bytes())?;
         self.attribute.write_to(w)
     }
 
     /// Construct an identity from a bytestream.
-    pub fn read_from<R: Readable>(r: &mut R) -> Result<Identity, Error> {
+    pub fn read_from<R: Readable>(r: &mut R) -> Result<Identity, LegacyError> {
         let timestamp = r.read_bytes(8)?;
         let timestamp = u64::from_be_bytes(*array_ref![timestamp, 0, 8]);
 

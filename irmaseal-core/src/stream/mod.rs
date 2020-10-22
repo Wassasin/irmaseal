@@ -7,6 +7,7 @@ pub(crate) mod util;
 #[cfg(test)]
 mod tests;
 
+pub use futures::prelude::*;
 pub use opener::*;
 pub use sealer::*;
 
@@ -16,7 +17,7 @@ pub(crate) type Aes = ctr::Ctr128<aes::Aes256>;
 pub(crate) type Verifier = hmac::Hmac<sha3::Sha3_256>;
 
 pub struct SymCrypt {
-    aes: Aes
+    aes: Aes,
 }
 
 /// The tag 'IRMASEAL' with which all IRMAseal bytestreams start.
